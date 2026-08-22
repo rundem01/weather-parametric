@@ -1,0 +1,15 @@
+{
+  "contract": "WeatherParametricInsurance",
+  "constructor": {
+    "location": "Cape Town, South Africa",
+    "threshold_temp": 325,
+    "trusted_weather_source": "https://YOUR-DOMAIN/api/weather?city=Cape%20Town%2C%20South%20Africa",
+    "policy_duration_days": 30,
+    "payout_amount": 1000000000000000000
+  },
+  "notes": {
+    "threshold_temp": "325 means 32.5°C.",
+    "payout_amount": "1 GEN = 1000000000000000000 wei.",
+    "trusted_weather_source": "The contract enforces an exact-URL trust policy. The source should return JSON containing location, temperature_c, and observed_at fields."
+  }
+}

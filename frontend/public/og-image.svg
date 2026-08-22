@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#07080a"/>
+  <circle cx="600" cy="-30" r="390" fill="#ffffff" opacity="0.05"/>
+  <rect x="74" y="74" width="1052" height="482" rx="36" fill="#101216" stroke="#ffffff" stroke-opacity="0.1"/>
+  <circle cx="126" cy="128" r="7" fill="#58d68d"/>
+  <text x="148" y="137" fill="#9aa1ad" font-family="Arial, sans-serif" font-size="22" font-weight="700" letter-spacing="5">GENLAYER</text>
+  <text x="126" y="270" fill="#f7f8fa" font-family="Arial, sans-serif" font-size="58" font-weight="700">Weather Parametric</text>
+  <text x="126" y="338" fill="#9298a3" font-family="Arial, sans-serif" font-size="58" font-weight="700">Insurance</text>
+  <text x="126" y="414" fill="#717783" font-family="Arial, sans-serif" font-size="25">Weather data → AI consensus → policy decision</text>
+  <rect x="126" y="466" width="220" height="42" rx="21" fill="#58d68d" fill-opacity="0.1" stroke="#58d68d" stroke-opacity="0.25"/>
+  <text x="236" y="494" text-anchor="middle" fill="#75e3a1" font-family="Arial, sans-serif" font-size="16" font-weight="700">INTELLIGENT CONTRACT</text>
+</svg>

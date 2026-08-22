@@ -1,0 +1,3 @@
+# Configure this file for the GenLayer environment you use for integration tests.
+# Keep environment-specific RPC/account secrets out of this repository.
+network: studionet
