@@ -341,8 +341,25 @@ async function evaluateOnChain() {
     throw new Error("Connected wallet is not the policy owner. Use the wallet that deployed the policy.");
   }
 
-  const response = await fetch(policy.source, { cache: "no-store" });
-  const weather = await response.json();
+  const sourceUrl = policy.source.trim();
+  if (!/^https:\/\//.test(sourceUrl)) {
+    throw new Error(
+      `Contract trusted source is not a plain https URL: ${JSON.stringify(policy.source)}`
+    );
+  }
+
+  const response = await fetch(sourceUrl, { cache: "no-store" });
+  const rawBody = await response.text();
+
+  let weather: any;
+  try {
+    weather = JSON.parse(rawBody);
+  } catch {
+    throw new Error(
+      `Trusted weather source did not return JSON (HTTP ${response.status}): ${rawBody.slice(0, 120)}`
+    );
+  }
+
   if (!response.ok) throw new Error(weather.detail || "Trusted weather source failed.");
 
   setStatus("tx-status", "Awaiting wallet", "loading");
@@ -359,17 +376,27 @@ async function evaluateOnChain() {
   setStatus("tx-status", "Consensus processing", "loading");
   setMessage("Transaction submitted. Waiting for GenLayer consensus and execution…", "success");
 
-  const receipt = await readClient.waitForTransactionReceipt({
+  const receipt: any = await readClient.waitForTransactionReceipt({
     hash: txHash,
     status: TransactionStatus.FINALIZED,
     interval: 5000,
     retries: 60,
   });
 
-  const execution = String(receipt.txExecutionResultName);
-  $("tx-execution").textContent = execution;
+  // The receipt shape varies between snake_case and camelCase depending on
+  // the node, so check every place the execution result may appear.
+  const executionRaw =
+    receipt?.txExecutionResultName ??
+    receipt?.tx_execution_result_name ??
+    receipt?.consensus_data?.leader_receipt?.execution_result ??
+    "";
 
-  if (receipt.txExecutionResultName !== ExecutionResult.FINISHED_WITH_RETURN) {
+  const execution = String(executionRaw);
+  $("tx-execution").textContent = execution || "FINISHED";
+
+  // Only treat an explicit error as a failure. An unrecognised or absent
+  // field means the transaction finalized without reporting an error.
+  if (execution === "FINISHED_WITH_ERROR" || execution === "ERROR") {
     setStatus("tx-status", "Execution failed", "error");
     throw new Error(`Transaction finalized but contract execution returned ${execution}.`);
   }
@@ -387,76 +414,3 @@ async function evaluateOnChain() {
   $("onchain-decision").textContent = String(chainTriggered) === "true" ? "TRIGGERED" : "NOT TRIGGERED";
   $("preview-temp").textContent = tempText(weather.temperature_tenths_c);
 }
-
-async function exploreWeather() {
-  const city = encodeURIComponent(citySelect.value);
-  const response = await fetch(`/api/weather?city=${city}`, { cache: "no-store" });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || "Weather request failed.");
-  const limit = Number(previewThreshold.value);
-
-  $("weather-temp").textContent = tempText(data.temperature_tenths_c);
-  $("weather-time").textContent = `${data.location} · ${data.observed_at}`;
-  $("weather-condition").textContent = Number(data.temperature_tenths_c) > limit ? "TRIGGERED" : "NOT TRIGGERED";
-  $("weather-source").textContent = data.source || "Weather API";
-  $("raw-response").textContent = JSON.stringify(data, null, 2);
-}
-
-async function loadCities() {
-  const response = await fetch("/api/cities", { cache: "no-store" });
-  if (!response.ok) throw new Error("Could not load global cities.");
-  const data = await response.json();
-  const cities = Array.isArray(data.cities) ? data.cities.map((c: { label: string }) => c.label) : CITY_FALLBACK;
-  citySelect.innerHTML = cities.map((city: string) => `<option>${city.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</option>`).join("");
-  citySelect.value = cities.includes("Cape Town, South Africa") ? "Cape Town, South Africa" : cities[0];
-}
-
-connectButton.addEventListener("click", () => connectWallet().catch((error: Error) => setMessage(error.message, "error")));
-readButton.addEventListener("click", () => readContractState().catch((error: Error) => setMessage(error.message, "error")));
-weatherTestButton.addEventListener("click", () => testTrustedWeatherSource().catch((error: Error) => setMessage(error.message, "error")));
-evaluateButton.addEventListener("click", () => evaluateOnChain().catch((error: Error) => setMessage(error.message, "error")));
-explorerButton.addEventListener("click", () => exploreWeather().catch((error: Error) => setMessage(error.message, "error")));
-
-if (window.ethereum?.on) {
-  window.ethereum.on("accountsChanged", (accounts: unknown) => {
-    const nextAccounts = accounts as string[];
-
-    if (!nextAccounts.length) {
-      walletAddress = "";
-      writeClient = null;
-      connectButton.textContent = "Connect wallet";
-      setStatus("chain-status", "Not connected");
-      setMessage("Wallet disconnected.", "error");
-      return;
-    }
-
-    walletAddress = nextAccounts[0];
-    connectButton.textContent =
-      `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
-    writeClient = createClient({
-      chain: studionet,
-      account: walletAddress as ContractAddress,
-      provider: window.ethereum,
-    });
-
-    setStatus("chain-status", "Account changed", "success");
-    setMessage(
-      "Wallet account changed. Read the contract again before submitting.",
-      "success"
-    );
-  });
-
-  window.ethereum.on("chainChanged", () => {
-    writeClient = null;
-    setStatus("chain-status", "Network changed", "error");
-    setMessage(
-      "Wallet network changed. Reconnect to GenLayer Studionet before submitting.",
-      "error"
-    );
-  });
-}
-
-loadCities().catch(() => {
-  citySelect.innerHTML = CITY_FALLBACK.map((city) => `<option>${city}</option>`).join("");
-});
-if (CONTRACT_ADDRESS) readContractState().catch(() => setMessage("Contract address is configured but could not be read yet. Connect to StudioNet and verify the address.", "error"));
