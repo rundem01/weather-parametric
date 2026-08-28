@@ -1,7 +1,7 @@
 {
   "location": "Cape Town, South Africa",
   "threshold_temp": 325,
-  "trusted_weather_source": "https://YOUR-VERCEL-DOMAIN.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa",
+  "trusted_weather_source": "https://weather-parametric-real.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa ",
   "policy_duration_days": 30,
   "payout_amount": 1000,
   "notes": [
