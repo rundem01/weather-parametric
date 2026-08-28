@@ -1,10 +1,13 @@
 import "./style.css";
 import { createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
+import { TransactionStatus } from "genlayer-js/types";
 
 interface EthereumProvider {
-  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  request(args: {
+    method: string;
+    params?: unknown[];
+  }): Promise<unknown>;
   on?: (event: string, handler: (...args: unknown[]) => void) => void;
 }
 
@@ -18,6 +21,19 @@ type ContractAddress = `0x${string}`;
 
 const CONTRACT_ADDRESS = (import.meta.env.VITE_GENLAYER_CONTRACT_ADDRESS || "") as ContractAddress | "";
 const NETWORK = import.meta.env.VITE_GENLAYER_NETWORK || "studionet";
+
+const STUDIONET_CHAIN_ID = "0xf21f";
+
+const STUDIONET_CHAIN = {
+  chainId: STUDIONET_CHAIN_ID,
+  chainName: "GenLayer Studionet",
+  nativeCurrency: {
+    name: "GEN",
+    symbol: "GEN",
+    decimals: 18,
+  },
+  rpcUrls: ["https://studio.genlayer.com/api"],
+};
 
 const CITY_FALLBACK = [
   "Cape Town, South Africa", "Johannesburg, South Africa", "Lagos, Nigeria",
@@ -181,22 +197,86 @@ function contractAddress(): ContractAddress {
 }
 
 async function connectWallet() {
-  if (!window.ethereum) throw new Error("A browser wallet such as MetaMask is required for contract writes.");
+  const provider = window.ethereum;
 
-  const accounts = (await window.ethereum.request({ method: "eth_requestAccounts" })) as string[];
-  if (!accounts.length) throw new Error("No wallet account was returned.");
+  if (!provider) {
+    throw new Error(
+      "No injected wallet detected. Install or enable a browser wallet and try again."
+    );
+  }
+
+  setStatus("chain-status", "Connecting", "loading");
+  setMessage("Requesting access to your injected wallet…");
+
+  const accounts = (await provider.request({
+    method: "eth_requestAccounts",
+  })) as string[];
+
+  if (!accounts.length) {
+    throw new Error("No wallet account was returned.");
+  }
 
   walletAddress = accounts[0];
+
+  let chainId = String(
+    await provider.request({
+      method: "eth_chainId",
+    })
+  ).toLowerCase();
+
+  if (chainId !== STUDIONET_CHAIN_ID) {
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: STUDIONET_CHAIN_ID }],
+      });
+    } catch (error: unknown) {
+      const code = (error as { code?: number }).code;
+
+      if (code === 4902) {
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [STUDIONET_CHAIN],
+        });
+
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: STUDIONET_CHAIN_ID }],
+        });
+      } else {
+        throw new Error(
+          "Your wallet could not switch to GenLayer Studionet. Switch to Studionet in your wallet and try again."
+        );
+      }
+    }
+  }
+
+  chainId = String(
+    await provider.request({
+      method: "eth_chainId",
+    })
+  ).toLowerCase();
+
+  if (chainId !== STUDIONET_CHAIN_ID) {
+    throw new Error(
+      `Wrong network (${chainId}). Connect the wallet to GenLayer Studionet (chain 61999).`
+    );
+  }
+
   writeClient = createClient({
     chain: studionet,
     account: walletAddress as ContractAddress,
-    provider: window.ethereum,
+    provider,
   });
 
-  await writeClient.connect("studionet");
-  connectButton.textContent = `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+  connectButton.textContent =
+    `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+
   setStatus("chain-status", "Wallet connected", "success");
-  setMessage("Wallet connected to StudioNet. Read the contract to load its policy.", "success");
+  setMessage(
+    "Wallet connected to GenLayer Studionet. Read the contract to load its policy.",
+    "success"
+  );
 }
 
 async function readContractState() {
@@ -286,10 +366,21 @@ async function evaluateOnChain() {
     retries: 60,
   });
 
-  const execution = String(receipt.txExecutionResultName);
-  $("tx-execution").textContent = execution;
+  // The receipt field name varies between node versions, so check each place
+  // the execution result may appear before deciding anything failed.
+  const anyReceipt = receipt as any;
+  const executionRaw =
+    anyReceipt?.txExecutionResultName ??
+    anyReceipt?.tx_execution_result_name ??
+    anyReceipt?.consensus_data?.leader_receipt?.execution_result ??
+    "";
 
-  if (receipt.txExecutionResultName !== ExecutionResult.FINISHED_WITH_RETURN) {
+  const execution = String(executionRaw);
+  $("tx-execution").textContent = execution || "FINISHED";
+
+  // Only an explicit error counts as a failure. A missing or unrecognised
+  // field means the transaction finalized without reporting a problem.
+  if (execution === "FINISHED_WITH_ERROR" || execution === "ERROR") {
     setStatus("tx-status", "Execution failed", "error");
     throw new Error(`Transaction finalized but contract execution returned ${execution}.`);
   }
@@ -336,6 +427,84 @@ readButton.addEventListener("click", () => readContractState().catch((error: Err
 weatherTestButton.addEventListener("click", () => testTrustedWeatherSource().catch((error: Error) => setMessage(error.message, "error")));
 evaluateButton.addEventListener("click", () => evaluateOnChain().catch((error: Error) => setMessage(error.message, "error")));
 explorerButton.addEventListener("click", () => exploreWeather().catch((error: Error) => setMessage(error.message, "error")));
+
+if (window.ethereum?.on) {
+  window.ethereum.on("accountsChanged", (accounts: unknown) => {
+    const nextAccounts = accounts as string[];
+
+    if (!nextAccounts.length) {
+      walletAddress = "";
+      writeClient = null;
+      connectButton.textContent = "Connect wallet";
+      setStatus("chain-status", "Not connected");
+      setMessage("Wallet disconnected.", "error");
+      return;
+    }
+
+    walletAddress = nextAccounts[0];
+    connectButton.textContent =
+      `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+    writeClient = createClient({
+      chain: studionet,
+      account: walletAddress as ContractAddress,
+      provider: window.ethereum,
+    });
+
+    setStatus("chain-status", "Account changed", "success");
+    setMessage(
+      "Wallet account changed. Read the contract again before submitting.",
+      "success"
+    );
+  });
+
+  window.ethereum.on("chainChanged", () => {
+    writeClient = null;
+    setStatus("chain-status", "Network changed", "error");
+    setMessage(
+      "Wallet network changed. Reconnect to GenLayer Studionet before submitting.",
+      "error"
+    );
+  });
+}
+
+async function restoreWalletConnection() {
+  const provider = window.ethereum;
+  if (!provider) return;
+
+  const accounts = (await provider.request({
+    method: "eth_accounts",
+  })) as string[];
+
+  if (!accounts.length) return;
+
+  const chainId = String(
+    await provider.request({ method: "eth_chainId" })
+  ).toLowerCase();
+
+  if (chainId !== STUDIONET_CHAIN_ID) {
+    setStatus("chain-status", "Wrong network", "error");
+    setMessage(
+      "Wallet is connected but not on GenLayer Studionet. Click Connect wallet to switch.",
+      "error"
+    );
+    return;
+  }
+
+  walletAddress = accounts[0];
+  writeClient = createClient({
+    chain: studionet,
+    account: walletAddress as ContractAddress,
+    provider,
+  });
+
+  connectButton.textContent =
+    `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`;
+  setStatus("chain-status", "Wallet connected", "success");
+}
+
+restoreWalletConnection().catch(() => {
+  setStatus("chain-status", "Not connected");
+});
 
 loadCities().catch(() => {
   citySelect.innerHTML = CITY_FALLBACK.map((city) => `<option>${city}</option>`).join("");
