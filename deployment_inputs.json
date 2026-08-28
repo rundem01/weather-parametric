@@ -1,0 +1,13 @@
+{
+  "location": "Cape Town, South Africa",
+  "threshold_temp": 325,
+  "trusted_weather_source": "https://YOUR-VERCEL-DOMAIN.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa",
+  "policy_duration_days": 30,
+  "payout_amount": 1000,
+  "notes": [
+    "Deploy the Vercel app first.",
+    "Replace YOUR-VERCEL-DOMAIN with the real deployment domain.",
+    "Deploy the contract with this exact trusted URL.",
+    "The connected frontend wallet must be the policy owner."
+  ]
+}
