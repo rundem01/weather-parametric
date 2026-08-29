@@ -98,6 +98,8 @@ app.innerHTML = `
         <div><span>Threshold</span><strong id="policy-threshold">—</strong></div>
         <div><span>Trusted source</span><strong id="policy-source">—</strong></div>
         <div><span>Policy status</span><strong id="policy-status">—</strong></div>
+        <div><span>Coverage window</span><strong id="policy-coverage">—</strong></div>
+        <div><span>Funding</span><strong id="policy-funding">—</strong></div>
       </div>
     </section>
 
@@ -151,6 +153,10 @@ app.innerHTML = `
         <div><span>Consensus verified</span><strong id="chain-verified">—</strong></div>
         <div><span>Observed temperature</span><strong id="chain-observed">—</strong></div>
         <div><span>Observed at</span><strong id="chain-observed-at">—</strong></div>
+        <div><span>Settlement status</span><strong id="chain-settlement">—</strong></div>
+        <div><span>Paid out</span><strong id="chain-paid-out">—</strong></div>
+        <div><span>Refunded</span><strong id="chain-refunded">—</strong></div>
+        <div><span>Rejection reason</span><strong id="chain-invalid">—</strong></div>
       </div>
       <pre id="chain-summary">No state read yet.</pre>
     </section>
@@ -283,16 +289,31 @@ async function readContractState() {
   const address = contractAddress();
   setStatus("tx-status", "Reading", "loading");
 
-  const [location, threshold, source, status, triggered, verified, observed, observedAt, summary] = await Promise.all([
-    readClient.readContract({ address, functionName: "get_location", args: [] }),
-    readClient.readContract({ address, functionName: "get_threshold_temp", args: [] }),
-    readClient.readContract({ address, functionName: "get_trusted_weather_source", args: [] }),
-    readClient.readContract({ address, functionName: "get_policy_status", args: [] }),
-    readClient.readContract({ address, functionName: "get_payout_triggered", args: [] }),
-    readClient.readContract({ address, functionName: "get_verified_by_consensus", args: [] }),
-    readClient.readContract({ address, functionName: "get_last_observed_temp", args: [] }),
-    readClient.readContract({ address, functionName: "get_last_observed_at", args: [] }),
-    readClient.readContract({ address, functionName: "get_weather_summary", args: [] }),
+  const read = (functionName: string) =>
+    readClient.readContract({ address, functionName, args: [] });
+
+  const [
+    location, threshold, source, status, triggered, verified, observed, observedAt, summary,
+    coverageStart, coverageEnd, invalidReason, settlementStatus,
+    payoutAmount, paidOut, refunded, balance,
+  ] = await Promise.all([
+    read("get_location"),
+    read("get_threshold_temp"),
+    read("get_trusted_weather_source"),
+    read("get_policy_status"),
+    read("get_payout_triggered"),
+    read("get_verified_by_consensus"),
+    read("get_last_observed_temp"),
+    read("get_last_observed_at"),
+    read("get_weather_summary"),
+    read("get_coverage_start"),
+    read("get_coverage_end"),
+    read("get_invalid_reason"),
+    read("get_settlement_status"),
+    read("get_payout_amount"),
+    read("get_total_paid_out"),
+    read("get_total_refunded"),
+    read("get_contract_balance"),
   ]);
 
   policy = { location: String(location), threshold: Number(threshold), source: String(source) };
@@ -307,6 +328,14 @@ async function readContractState() {
   $("chain-observed").textContent = Number(observed) === 0 ? "—" : tempText(Number(observed));
   $("chain-observed-at").textContent = String(observedAt) || "—";
   $("chain-summary").textContent = String(summary || "No weather evaluation recorded yet.");
+
+  $("policy-coverage").textContent = `${coverageStart} → ${coverageEnd}`;
+  $("policy-funding").textContent =
+    `${balance} / ${payoutAmount} GEN${Number(balance) >= Number(payoutAmount) ? " (funded)" : " (underfunded)"}`;
+  $("chain-settlement").textContent = String(settlementStatus);
+  $("chain-paid-out").textContent = `${paidOut} GEN`;
+  $("chain-refunded").textContent = `${refunded} GEN`;
+  $("chain-invalid").textContent = String(invalidReason) || "—";
   setStatus("tx-status", "State loaded", "success");
   setMessage("Read-only contract state loaded directly from GenLayer.", "success");
 }
