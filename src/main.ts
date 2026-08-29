@@ -22,7 +22,7 @@ type ContractAddress = `0x${string}`;
 const CONTRACT_ADDRESS = (import.meta.env.VITE_GENLAYER_CONTRACT_ADDRESS || "") as ContractAddress | "";
 const NETWORK = import.meta.env.VITE_GENLAYER_NETWORK || "studionet";
 
-const STUDIONET_CHAIN_ID = "0xf21f";
+const STUDIONET_CHAIN_ID = "0xf22f";
 
 const STUDIONET_CHAIN = {
   chainId: STUDIONET_CHAIN_ID,
