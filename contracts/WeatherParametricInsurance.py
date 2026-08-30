@@ -1,7 +1,13 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
+import hashlib
 import json
+
+# DER prefix for a SHA-256 DigestInfo (RFC 8017 §9.2). Used to check the
+# PKCS#1 v1.5 padding of a recovered RSA signature.
+SHA256_DER_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+RSA_PUBLIC_EXPONENT = 65537
 
 
 class WeatherParametricInsurance(gl.Contract):
@@ -41,6 +47,7 @@ class WeatherParametricInsurance(gl.Contract):
     location: str
     threshold_temp: i32
     trusted_weather_source: str
+    trusted_public_key_modulus: str
     policy_duration_days: u32
 
     coverage_start: str
@@ -71,6 +78,7 @@ class WeatherParametricInsurance(gl.Contract):
         location: str,
         threshold_temp: i32,
         trusted_weather_source: str,
+        trusted_public_key_modulus: str,
         policy_duration_days: u32,
         payout_amount: u256,
         coverage_start: str,
@@ -87,6 +95,15 @@ class WeatherParametricInsurance(gl.Contract):
 
         if not trusted_weather_source.startswith("https://"):
             raise gl.vm.UserError("WEATHER_SOURCE_MUST_BE_HTTPS")
+
+        modulus = trusted_public_key_modulus.strip().lower()
+        if modulus.startswith("0x"):
+            modulus = modulus[2:]
+        if len(modulus) < 256:
+            raise gl.vm.UserError("PUBLIC_KEY_TOO_SHORT")
+        for ch in modulus:
+            if ch not in "0123456789abcdef":
+                raise gl.vm.UserError("PUBLIC_KEY_NOT_HEX")
 
         if policy_duration_days == 0:
             raise gl.vm.UserError("POLICY_DURATION_REQUIRED")
@@ -109,6 +126,7 @@ class WeatherParametricInsurance(gl.Contract):
         self.location = location
         self.threshold_temp = threshold_temp
         self.trusted_weather_source = trusted_weather_source
+        self.trusted_public_key_modulus = modulus
         self.policy_duration_days = policy_duration_days
 
         self.coverage_start = start
@@ -181,6 +199,77 @@ class WeatherParametricInsurance(gl.Contract):
 
         return candidate
 
+    def _verify_signature(
+        self, modulus_hex: str, signature_hex: str, message: bytes
+    ) -> bool:
+        """
+        RSA PKCS#1 v1.5 / SHA-256 signature verification, in pure Python.
+
+        GenVM exposes hashlib and arbitrary-precision integers but no
+        signature library, so verification is done directly: recover the
+        padded block with a modular exponentiation, then check its structure
+        and the embedded digest.
+
+        Returns False on any malformed input rather than raising, so a bad
+        signature is a policy outcome and not an execution failure.
+        """
+        try:
+            n = int(modulus_hex, 16)
+            s = int(signature_hex, 16)
+        except Exception:
+            return False
+
+        if s <= 0 or s >= n:
+            return False
+
+        k = (n.bit_length() + 7) // 8
+        try:
+            em = pow(s, RSA_PUBLIC_EXPONENT, n).to_bytes(k, "big")
+        except Exception:
+            return False
+
+        # EM = 0x00 || 0x01 || PS (0xFF...) || 0x00 || DigestInfo
+        if len(em) < 11 or em[0] != 0x00 or em[1] != 0x01:
+            return False
+
+        i = 2
+        while i < len(em) and em[i] == 0xFF:
+            i += 1
+
+        if (i - 2) < 8 or i >= len(em) or em[i] != 0x00:
+            return False
+
+        digest_info = em[i + 1:]
+        expected = SHA256_DER_PREFIX + hashlib.sha256(message).digest()
+
+        if len(digest_info) != len(expected):
+            return False
+
+        # Constant-time-ish comparison.
+        diff = 0
+        for a, b in zip(digest_info, expected):
+            diff |= a ^ b
+        return diff == 0
+
+    @staticmethod
+    def _canonical_message(
+        location: str, temperature_tenths_c: int, observed_at: str
+    ) -> bytes:
+        """
+        The exact bytes the adapter signs. Key order and separators are fixed
+        so the adapter and the contract produce identical input; any drift
+        here invalidates every signature.
+        """
+        return json.dumps(
+            {
+                "location": location,
+                "temperature_tenths_c": temperature_tenths_c,
+                "observed_at": observed_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
     def _within_coverage(self, observed_at: str) -> bool:
         normalized = self._normalize_timestamp(observed_at)
 
@@ -211,6 +300,50 @@ class WeatherParametricInsurance(gl.Contract):
     @gl.public.view
     def get_trusted_weather_source(self) -> str:
         return self.trusted_weather_source
+
+    @gl.public.view
+    def get_trusted_public_key_modulus(self) -> str:
+        return self.trusted_public_key_modulus
+
+    @gl.public.view
+    def selftest_signature_verification(self) -> str:
+        """
+        Verifies a fixed known-good signature against a fixed key, then the
+        same signature against tampered data. Proves the verifier works
+        inside GenVM without needing a live fetch.
+
+        Expected: "OK valid=True tampered=False"
+        """
+        modulus = (
+            "c3c3e82976d581029eb8c5717036819a2026ac8cdc38fa56f876be66d5c8da03"
+            "a8a1e5b77bc328272ed9c240120940657f184542af00f6c50abc098e9c30c5a9"
+            "b8da4d0c3c3822b41aee5ef8daa2051c8e6dcf5f1306daff89aaffd63d8faf9c"
+            "712abccc0f2781cbb3131374c30f823cda982ff7b516060a0687100cc4e1dc5f"
+            "87c13c9e7ff17581b3c6eb67888787044c50f4fcdc7874cd2440d0e8e938f5c0"
+            "47e7ea196f40918e455b3958defebc52332aab0513b5e3c8fca7885cd224e074"
+            "f657b62adf35c6088c4c78c92ac9a70fe21dd6a60d333465b01d3f8c940018cc"
+            "9af7f27e2cae249d9e9a2b99fc7271759a7802f4fc8d8dff91ebc38c251d2ae7"
+        )
+        signature = (
+            "7ce6fed50f0a2c1f6c9134b563894ea5cbed1a492c53c496ab124945a83d9eb7"
+            "d898daa5e53bbc4e269b335dbf83e12c8d7c7408ec9cdae620f5e1e7d828315d"
+            "12c282b4afe4f8d0fc4ebbeafa9786feac9b30bf2aae0704ed73f8830c867fc3"
+            "3da9d8f4d08f8369db453a2868488531b4a1925481996e6a4a460100a0244833"
+            "1a15ee6be8a034b0fe057c2cbacfe1a3eb58049e0e293d84e4e81ae8de800c9d"
+            "cec5f7de483f95453d5a37816563e080c1e62e37682112799a94ec29f39a166d"
+            "995181dfb12577169367f41624b4fdad36ca40d44e23b1c7ee4ec453e084f1a2"
+            "261e9a29338e5447b5970ccfd13b1351bb1aa0bfde06a3ab8ec864812747acff"
+        )
+
+        good = self._verify_signature(
+            modulus, signature,
+            self._canonical_message("Selftest City", 200, "2026-01-01T00:00"),
+        )
+        bad = self._verify_signature(
+            modulus, signature,
+            self._canonical_message("Selftest City", 999, "2026-01-01T00:00"),
+        )
+        return f"OK valid={good} tampered={bad}"
 
     @gl.public.view
     def get_policy_duration_days(self) -> u32:
@@ -350,6 +483,9 @@ class WeatherParametricInsurance(gl.Contract):
         policy_location = self.location
         policy_threshold = int(self.threshold_temp)
         trusted_url = self.trusted_weather_source
+        trusted_modulus = self.trusted_public_key_modulus
+        verify = self._verify_signature
+        canonical = self._canonical_message
 
         def fetch_weather_record() -> dict:
             try:
@@ -370,6 +506,13 @@ class WeatherParametricInsurance(gl.Contract):
             source_location = payload.get("location")
             temperature_tenths = payload.get("temperature_tenths_c")
             observed_at = payload.get("observed_at")
+            signature = payload.get("signature")
+
+            if not isinstance(signature, str) or signature == "":
+                return {
+                    "valid": False,
+                    "error": "SIGNATURE_MISSING",
+                }
 
             if not isinstance(source_location, str):
                 return {
@@ -395,11 +538,25 @@ class WeatherParametricInsurance(gl.Contract):
                     "error": "TEMPERATURE_OUT_OF_RANGE",
                 }
 
+            # The observation is only trusted if it carries a valid signature
+            # from the key registered at deployment. Reaching the configured
+            # host over TLS proves nothing about the reading itself.
+            if not verify(
+                trusted_modulus,
+                signature,
+                canonical(source_location, temperature_tenths, observed_at),
+            ):
+                return {
+                    "valid": False,
+                    "error": "SIGNATURE_INVALID",
+                }
+
             return {
                 "valid": True,
                 "location": source_location,
                 "temperature_tenths_c": temperature_tenths,
                 "observed_at": observed_at,
+                "signature_verified": True,
             }
 
         def leader_fn() -> dict:
@@ -684,6 +841,7 @@ Rules:
         new_location: str,
         new_threshold_temp: i32,
         new_trusted_weather_source: str,
+        new_trusted_public_key_modulus: str,
         new_policy_duration_days: u32,
         new_payout_amount: u256,
         new_coverage_start: str,
@@ -709,6 +867,12 @@ Rules:
         if not new_trusted_weather_source.startswith("https://"):
             raise gl.vm.UserError("WEATHER_SOURCE_MUST_BE_HTTPS")
 
+        new_modulus = new_trusted_public_key_modulus.strip().lower()
+        if new_modulus.startswith("0x"):
+            new_modulus = new_modulus[2:]
+        if len(new_modulus) < 256:
+            raise gl.vm.UserError("PUBLIC_KEY_TOO_SHORT")
+
         if new_policy_duration_days == 0:
             raise gl.vm.UserError("POLICY_DURATION_REQUIRED")
 
@@ -727,6 +891,7 @@ Rules:
         self.location = new_location
         self.threshold_temp = new_threshold_temp
         self.trusted_weather_source = new_trusted_weather_source
+        self.trusted_public_key_modulus = new_modulus
         self.policy_duration_days = new_policy_duration_days
         self.payout_amount = new_payout_amount
 
