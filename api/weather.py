@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -17,18 +18,23 @@ SIGNING_KEY_PEM = os.environ.get("WEATHER_SIGNING_KEY_PEM", "").replace("\\n", "
 
 
 def canonical_message(
-    location: str, temperature_tenths_c: int, observed_at: str
+    location: str, temperature_tenths_c: int, observed_at: str, issued_at: str
 ) -> bytes:
     """
     The exact bytes that get signed. Key order and separators are fixed and
     must match the contract's _canonical_message byte for byte — any drift
     here invalidates every signature the contract sees.
+
+    issued_at binds the signing moment into the signature, which is what
+    lets the contract enforce freshness: a stale record cannot be re-served
+    with a new issue time without breaking its signature.
     """
     return json.dumps(
         {
+            "issued_at": issued_at,
             "location": location,
-            "temperature_tenths_c": temperature_tenths_c,
             "observed_at": observed_at,
+            "temperature_tenths_c": temperature_tenths_c,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -54,6 +60,7 @@ def sign_observation(record: dict) -> str:
         record["location"],
         int(record["temperature_tenths_c"]),
         record["observed_at"],
+        record["issued_at"],
     )
     return key.sign(message, padding.PKCS1v15(), hashes.SHA256()).hex()
 
@@ -68,6 +75,7 @@ def weather(
     )
 ) -> JSONResponse:
     record = fetch_weather(city)
+    record["issued_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
     record["signature"] = sign_observation(record)
     record["signature_alg"] = "RSA-PKCS1v15-SHA256"
 
