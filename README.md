@@ -4,15 +4,17 @@ A decentralized weather parametric insurance demo built on GenLayer Intelligent
 Contracts. A policy is deployed on-chain with a location, a temperature
 threshold, a coverage window, and a single trusted weather-source URL. When the
 policy is evaluated, the contract itself fetches that source, has multiple
-validators independently verify the reading through an LLM, reaches consensus on
-whether the payout condition is met, and — on settlement — transfers the payout
-to the policyholder.
+validators independently verify the signed, freshness-bound reading through an
+LLM, reaches consensus on whether the payout condition is met, and — on
+settlement — transfers the payout to the policyholder.
 
-The browser never decides the outcome. It submits a transaction and reads the
-result back from chain.
+The browser never decides the outcome, and neither does the policy owner:
+evaluation and settlement are permissionless, the beneficiary is locked once an
+evaluation has run, and the decisive input is a signed observation the caller
+cannot influence.
 
 **Live demo:** https://weather-parametric-real.vercel.app
-**Deployed policy:** `0x0C162ed25c327A38525A44bA5704AA871fD1bf07` (Studionet)
+**Deployed policy:** `<0xdA88A7d3cA8c70776688DE4b95E088251374Cd80>` (Studionet)
 
 ---
 
@@ -56,6 +58,7 @@ The adapter returns exactly this shape. The contract depends on it.
   "location": "Cape Town, South Africa",
   "temperature_tenths_c": 135,
   "observed_at": "2026-08-28T05:45",
+  "issued_at": "2026-08-28T05:47",
   "source": "Open-Meteo via Weather Parametric Insurance API",
   "signature": "8f3a1c…",
   "signature_alg": "RSA-PKCS1v15-SHA256"
@@ -81,9 +84,24 @@ ACTIVE
         └─→ INVALID        → withdraw_remaining()            (funding returned)
 ```
 
-A policy can only be evaluated while `ACTIVE`, and only its owner may evaluate
-or settle it. Once resolved, `withdraw_remaining` returns whatever balance is
-left to the policy owner, so funding is never stranded regardless of outcome.
+A policy can only be evaluated while `ACTIVE`. Once resolved,
+`withdraw_remaining` returns whatever balance is left to the policy owner, so
+funding is never stranded regardless of outcome.
+
+### Who can do what
+
+| Method | Callable by | Why |
+|---|---|---|
+| `fund_policy` | anyone | Funding is a deposit, not a decision |
+| `evaluate_weather_trigger` | anyone | The signed observation decides the outcome; the caller has no lever, so gating it would only grant the owner timing discretion |
+| `confirm_settlement` | anyone | Once TRIGGERED and ELIGIBLE the payout is owed; the owner must not be able to withhold it. Funds always go to the recorded policyholder |
+| `set_policyholder` | owner, **only while ACTIVE** | Locked at evaluation — otherwise the owner could redirect a triggered payout before settlement (`BENEFICIARY_LOCKED_AFTER_EVALUATION`) |
+| `withdraw_remaining` | owner | It is the owner's own residual funding |
+| `renew_policy` | owner | Resetting terms is the owner's decision, blocked while a balance remains |
+
+The design intent: everything that determines *whether and to whom* value moves
+is decided by the signed evidence and fixed at evaluation time. The owner's
+remaining powers touch only their own money.
 
 ### Coverage window
 
@@ -146,6 +164,20 @@ Verification happens inside `fetch_weather_record`, which each validator runs
 against its **own** fetch. A forged reading fails for all of them rather than
 only for the leader.
 
+### Freshness
+
+The adapter stamps each record with `issued_at` — the moment it produced and
+signed it — and that field sits **inside** the signed canonical message. Each
+validator requires the gap between `observed_at` and `issued_at` to be
+non-negative and at most 180 minutes; anything outside resolves to `INVALID`
+with reason `OBSERVATION_STALE`.
+
+Because the issue time is under the signature, a stale record cannot be
+re-served with a fresh stamp without invalidating it. And because every
+validator fetches live at evaluation time, the record each one checks was
+signed moments before — the bound is a guard against a compromised or lazy
+adapter serving archived data, not a substitute for the live fetch.
+
 ### Why RSA rather than Ed25519
 
 GenVM ships `hashlib` and arbitrary-precision integers, but no signature
@@ -180,9 +212,12 @@ and has not been altered in transit. Host compromise and tampering are closed.
 
 It does not make the adapter trustless. A signature proves provenance, not
 honesty: whoever holds the key can sign a false reading, and the contract will
-accept it. Closing that gap means signing at the sensor, or requiring several
-independently-keyed sources to agree — both meaningful extensions, neither
-implemented here.
+accept it. Nor does it make the evidence source independent — in this demo the
+policy owner also operates the adapter, which is a deployment arrangement the
+code cannot see. In production the signing key would be held by a third-party
+data provider with no stake in the policy. Closing the gap fully means signing
+at the sensor, or requiring several independently-keyed sources to agree —
+meaningful extensions, none implemented here.
 
 ---
 
@@ -191,7 +226,7 @@ implemented here.
 1. **Connect a wallet.** Requires an injected EVM wallet on GenLayer Studionet
    (chain `0xf22f` / 61999). The app will offer to add and switch to the network.
 2. **Read the contract.** The address field is pre-filled with
-   `0x0C162ed25c327A38525A44bA5704AA871fD1bf07`. Click *Read
+   `<DEPLOYED_CONTRACT_ADDRESS>`. Click *Read
    contract* and the policy fields, coverage window, funding status, and
    settlement accounting load from chain. This needs no wallet — reads are
    unsigned.
@@ -203,9 +238,9 @@ implemented here.
 5. **Read the result.** The on-chain decision, observed temperature, settlement
    status, and rejection reason all come from contract state after finalization.
 
-> The connected wallet must be the one that deployed the policy.
-> `evaluate_weather_trigger` and `confirm_settlement` both call
-> `_require_owner()` and revert otherwise.
+> Any connected wallet can evaluate and settle — both are permissionless by
+> design. Only `set_policyholder`, `withdraw_remaining` and `renew_policy`
+> require the policy owner.
 
 ### Weather explorer
 
@@ -385,6 +420,9 @@ Rejection reasons from `get_invalid_reason`:
 | `TRIGGER_DECISION_MISMATCH` | Consensus decision disagreed with the deterministic threshold comparison |
 | `SIGNATURE_MISSING` | The record carried no signature field |
 | `SIGNATURE_INVALID` | The signature did not verify against the registered public key |
+| `ISSUED_AT_MISSING` | The record carried no issue timestamp |
+| `TIMESTAMP_MALFORMED` | A timestamp did not match `YYYY-MM-DDTHH:MM` |
+| `OBSERVATION_STALE` | Issue and observation times were more than 180 minutes apart |
 
 ---
 
