@@ -20,4 +20,4 @@ Deploy `contracts/WeatherParametricInsurance.py` through GenLayer Studio.
 
 Two constructor arguments depend on the deployed Vercel domain:
 
-**`(https://YOUR-DOMAIN.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa)`**
+**`https://weather-parametric-real.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa`**
