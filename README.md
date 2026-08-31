@@ -12,6 +12,7 @@ The browser never decides the outcome. It submits a transaction and reads the
 result back from chain.
 
 **Live demo:** https://weather-parametric-real.vercel.app
+**Deployed policy:** `0x0C162ed25c327A38525A44bA5704AA871fD1bf07` (Studionet)
 
 ---
 
@@ -55,12 +56,17 @@ The adapter returns exactly this shape. The contract depends on it.
   "location": "Cape Town, South Africa",
   "temperature_tenths_c": 135,
   "observed_at": "2026-08-28T05:45",
-  "source": "Open-Meteo via Weather Parametric Insurance API"
+  "source": "Open-Meteo via Weather Parametric Insurance API",
+  "signature": "8f3a1c…",
+  "signature_alg": "RSA-PKCS1v15-SHA256"
 }
 ```
 
 Temperatures are integer tenths of a degree Celsius — `135` means 13.5°C.
 Integers avoid floating-point disagreement between validators.
+
+The `signature` field authenticates the observation itself. See
+*Observation authentication* below.
 
 ---
 
@@ -113,13 +119,82 @@ run while a balance remains, so funds cannot be orphaned by a reset.
 
 ---
 
+## Observation authentication
+
+TLS proves a response came from a particular host. It says nothing about
+whether the observation is genuine — anyone who controls the host, or who can
+intervene between it and the validators, controls the payout. So the reading is
+signed, and the contract verifies the signature before acting on it.
+
+### How it works
+
+The adapter holds an RSA-2048 private key. For each request it builds a
+canonical byte string from the three fields that matter and signs it with
+PKCS#1 v1.5 over SHA-256:
+
+```json
+{"location":"Cape Town, South Africa","observed_at":"2026-08-28T05:45","temperature_tenths_c":135}
+```
+
+Keys are sorted, separators carry no whitespace. The contract rebuilds this
+string from the fields it received and verifies the signature against the
+public modulus registered at deployment. Any drift between the two
+serializations invalidates every signature, so both sides construct it
+identically and deliberately.
+
+Verification happens inside `fetch_weather_record`, which each validator runs
+against its **own** fetch. A forged reading fails for all of them rather than
+only for the leader.
+
+### Why RSA rather than Ed25519
+
+GenVM ships `hashlib` and arbitrary-precision integers, but no signature
+library — no `ecdsa`, no `pynacl`, no `ecrecover` primitive in the SDK. So
+verification is implemented in pure Python.
+
+Given that, RSA is the safer choice. Verification is a modular exponentiation
+plus a padding check, roughly 25 lines. Ed25519 would need point decompression
+and modular inversion, closer to 70 lines with considerably more room for a
+subtle error. Both would work; only one is easy to audit by reading.
+
+`selftest_signature_verification()` is a view method that checks a fixed
+known-good signature and then the same signature against tampered data. It
+returns `OK valid=True tampered=False` and proves the verifier works inside
+GenVM without needing a live fetch. Call it immediately after deploying.
+
+### Key management
+
+The adapter's private key lives in the `WEATHER_SIGNING_KEY_PEM` environment
+variable on Vercel and is never committed. The corresponding public modulus is
+a constructor argument, stored on-chain, and readable via
+`get_trusted_public_key_modulus()`.
+
+Rotating the key means redeploying the policy — the modulus is fixed at
+construction alongside the trusted source. `renew_policy` accepts a new one,
+but only once a policy has resolved.
+
+### What this does and does not establish
+
+It establishes that the observation came from the holder of the registered key
+and has not been altered in transit. Host compromise and tampering are closed.
+
+It does not make the adapter trustless. A signature proves provenance, not
+honesty: whoever holds the key can sign a false reading, and the contract will
+accept it. Closing that gap means signing at the sensor, or requiring several
+independently-keyed sources to agree — both meaningful extensions, neither
+implemented here.
+
+---
+
 ## Using the demo
 
 1. **Connect a wallet.** Requires an injected EVM wallet on GenLayer Studionet
    (chain `0xf22f` / 61999). The app will offer to add and switch to the network.
-2. **Enter the contract address** and click *Read contract*. Policy fields,
-   coverage window, funding status, and settlement accounting load from chain.
-   This needs no wallet — reads are unsigned.
+2. **Read the contract.** The address field is pre-filled with
+   `0x0C162ed25c327A38525A44bA5704AA871fD1bf07`. Click *Read
+   contract* and the policy fields, coverage window, funding status, and
+   settlement accounting load from chain. This needs no wallet — reads are
+   unsigned.
 3. **Test live weather** (optional) fetches the contract's trusted source and
    shows what the browser thinks the answer would be. Preview only.
 4. **Evaluate through GenLayer** submits `evaluate_weather_trigger()` as a real
@@ -152,6 +227,7 @@ npm run dev
 |---|---|
 | `VITE_GENLAYER_CONTRACT_ADDRESS` | Pre-fills the contract address field |
 | `VITE_GENLAYER_NETWORK` | Display label for the network badge |
+| `WEATHER_SIGNING_KEY_PEM` | PEM-encoded RSA private key the adapter signs with. Server-side only — never exposed to the browser. |
 
 `VITE_` variables are inlined at build time. Changing one in Vercel requires a
 redeploy before it takes effect.
@@ -179,14 +255,17 @@ constructor arguments:
 | `location` | `Cape Town, South Africa` |
 | `threshold_temp` | `325` (32.5°C, in tenths) |
 | `trusted_weather_source` | `https://weather-parametric-real.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa` |
+| `trusted_public_key_modulus` | RSA-2048 public modulus, hex, no `0x` prefix (see `deployment_inputs.json`) |
 | `policy_duration_days` | `30` |
 | `payout_amount` | `1000` |
 | `coverage_start` | `2026-08-01T00:00` |
 | `coverage_end` | `2026-08-31T23:59` |
 
-After deploying, call `get_trusted_weather_source` and confirm it returns the
-bare URL with nothing prepended, and check the coverage window brackets the
-period you intend to test. A malformed trusted source cannot be corrected later
+After deploying, run three checks before funding: `selftest_signature_verification`
+should return `OK valid=True tampered=False`, `get_trusted_public_key_modulus`
+should match what you supplied at full length, and `get_trusted_weather_source`
+should return the bare URL with nothing prepended. Also check the coverage
+window brackets the period you intend to test. A malformed trusted source cannot be corrected later
 — `renew_policy` is blocked while the policy is `ACTIVE`, and the only exit from
 `ACTIVE` is a successful evaluation, which a bad URL prevents. The policy would
 need redeploying.
@@ -251,6 +330,14 @@ issue; the documented form carries no return annotation.
 digit broke all three — presenting as `chainId should be same as current
 chainId` with neither value named.
 
+### Runtime versus build dependencies on Vercel
+
+`requirements.txt` governs the build; the Python serverless functions are
+installed from `pyproject.toml`. A library listed only in the former installs
+during the build and is absent at runtime, so the endpoint returns 500 while
+the build log shows a clean install. Runtime dependencies belong in
+`pyproject.toml`.
+
 ### Wallet state on reload
 
 Wallet approval persists per origin, but the UI only updated on click, so a
@@ -284,6 +371,8 @@ Contract state after an evaluation:
 | `get_total_paid_out` | Value transferred to the policyholder |
 | `get_total_refunded` | Value returned to the policy owner |
 | `get_contract_balance` | What the contract currently holds |
+| `get_trusted_public_key_modulus` | The RSA public modulus observations are verified against |
+| `selftest_signature_verification` | Proves the in-contract verifier works; expects `OK valid=True tampered=False` |
 | `get_weather_summary` | Short factual summary from the evaluation |
 
 Rejection reasons from `get_invalid_reason`:
@@ -294,6 +383,8 @@ Rejection reasons from `get_invalid_reason`:
 | `SOURCE_RECORD_INVALID` | The fetched record failed schema or range validation |
 | `LOCATION_MISMATCH` | Observed location did not match the policy location |
 | `TRIGGER_DECISION_MISMATCH` | Consensus decision disagreed with the deterministic threshold comparison |
+| `SIGNATURE_MISSING` | The record carried no signature field |
+| `SIGNATURE_INVALID` | The signature did not verify against the registered public key |
 
 ---
 
