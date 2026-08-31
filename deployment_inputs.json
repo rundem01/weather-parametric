@@ -2,12 +2,19 @@
   "location": "Cape Town, South Africa",
   "threshold_temp": 325,
   "trusted_weather_source": "https://weather-parametric-real.vercel.app/api/weather?city=Cape%20Town%2C%20South%20Africa",
+  "trusted_public_key_modulus": "c3c3e82976d581029eb8c5717036819a2026ac8cdc38fa56f876be66d5c8da03a8a1e5b77bc328272ed9c240120940657f184542af00f6c50abc098e9c30c5a9b8da4d0c3c3822b41aee5ef8daa2051c8e6dcf5f1306daff89aaffd63d8faf9c712abccc0f2781cbb3131374c30f823cda982ff7b516060a0687100cc4e1dc5f87c13c9e7ff17581b3c6eb67888787044c50f4fcdc7874cd2440d0e8e938f5c047e7ea196f40918e455b3958defebc52332aab0513b5e3c8fca7885cd224e074f657b62adf35c6088c4c78c92ac9a70fe21dd6a60d333465b01d3f8c940018cc9af7f27e2cae249d9e9a2b99fc7271759a7802f4fc8d8dff91ebc38c251d2ae7",
   "policy_duration_days": 30,
   "payout_amount": 1000,
+  "coverage_start": "2026-08-01T00:00",
+  "coverage_end": "2026-08-31T23:59",
   "notes": [
-    "Deploy the Vercel app first.",
-    "Replace YOUR-VERCEL-DOMAIN with the real deployment domain.",
-    "Deploy the contract with this exact trusted URL.",
-    "The connected frontend wallet must be the policy owner."
+    "Arguments are listed in constructor order.",
+    "Deploy the Vercel app first, then the contract.",
+    "trusted_weather_source must be the exact URL the contract will fetch.",
+    "trusted_public_key_modulus is the RSA-2048 public modulus, hex, no 0x prefix. It must correspond to the private key held by the adapter in WEATHER_SIGNING_KEY_PEM, or every observation fails verification.",
+    "Coverage window is UTC in YYYY-MM-DDTHH:MM form and must bracket the period being tested.",
+    "threshold_temp is tenths of a degree Celsius: 325 = 32.5C. Use a value below the current temperature to demonstrate the payout path.",
+    "After deploying, call get_trusted_weather_source, get_trusted_public_key_modulus and selftest_signature_verification before funding.",
+    "The connected wallet must be the one that deployed the policy."
   ]
 }
