@@ -9,6 +9,10 @@ import json
 SHA256_DER_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 RSA_PUBLIC_EXPONENT = 65537
 
+# Maximum allowed gap, in minutes, between when an observation was made
+# and when the adapter signed it. Beyond this the record is stale.
+MAX_OBSERVATION_AGE_MINUTES = 180
+
 
 class WeatherParametricInsurance(gl.Contract):
     """
@@ -253,22 +257,54 @@ class WeatherParametricInsurance(gl.Contract):
 
     @staticmethod
     def _canonical_message(
-        location: str, temperature_tenths_c: int, observed_at: str
+        location: str, temperature_tenths_c: int, observed_at: str, issued_at: str
     ) -> bytes:
         """
         The exact bytes the adapter signs. Key order and separators are fixed
         so the adapter and the contract produce identical input; any drift
         here invalidates every signature.
+
+        issued_at is the moment the adapter produced and signed the record.
+        Binding it into the signature is what makes freshness checkable: an
+        old signed record cannot be re-served with a new issue time without
+        breaking its signature.
         """
         return json.dumps(
             {
+                "issued_at": issued_at,
                 "location": location,
-                "temperature_tenths_c": temperature_tenths_c,
                 "observed_at": observed_at,
+                "temperature_tenths_c": temperature_tenths_c,
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+
+    @staticmethod
+    def _timestamp_to_minutes(normalized: str) -> int:
+        """
+        Convert a normalized 'YYYY-MM-DDTHH:MM' timestamp to minutes since
+        the civil epoch, in pure arithmetic (GenVM availability of the
+        datetime module is unverified, and this needs ~10 lines either way).
+
+        Uses the standard days-from-civil algorithm. Input must already have
+        passed _normalize_timestamp.
+        """
+        year = int(normalized[0:4])
+        month = int(normalized[5:7])
+        day = int(normalized[8:10])
+        hour = int(normalized[11:13])
+        minute = int(normalized[14:16])
+
+        y = year - (1 if month <= 2 else 0)
+        era = (y if y >= 0 else y - 399) // 400
+        yoe = y - era * 400
+        mp = (month + 9) % 12
+        doy = (153 * mp + 2) // 5 + day - 1
+        doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+        days = era * 146097 + doe - 719468
+
+        return days * 1440 + hour * 60 + minute
 
     def _within_coverage(self, observed_at: str) -> bool:
         normalized = self._normalize_timestamp(observed_at)
@@ -325,23 +361,27 @@ class WeatherParametricInsurance(gl.Contract):
             "9af7f27e2cae249d9e9a2b99fc7271759a7802f4fc8d8dff91ebc38c251d2ae7"
         )
         signature = (
-            "7ce6fed50f0a2c1f6c9134b563894ea5cbed1a492c53c496ab124945a83d9eb7"
-            "d898daa5e53bbc4e269b335dbf83e12c8d7c7408ec9cdae620f5e1e7d828315d"
-            "12c282b4afe4f8d0fc4ebbeafa9786feac9b30bf2aae0704ed73f8830c867fc3"
-            "3da9d8f4d08f8369db453a2868488531b4a1925481996e6a4a460100a0244833"
-            "1a15ee6be8a034b0fe057c2cbacfe1a3eb58049e0e293d84e4e81ae8de800c9d"
-            "cec5f7de483f95453d5a37816563e080c1e62e37682112799a94ec29f39a166d"
-            "995181dfb12577169367f41624b4fdad36ca40d44e23b1c7ee4ec453e084f1a2"
-            "261e9a29338e5447b5970ccfd13b1351bb1aa0bfde06a3ab8ec864812747acff"
+            "90f02d59a8d3a0d92e41d9d3585b9d8406efe423cea168037fd145eef7fadbbb"
+            "9d61b4fa24d8bc5bfe406ccfab3751431289be4739b9fb065bcef6acb265cc5a"
+            "535f638d4d87c22e1a73a318f9c39307b5f4e8e01ef46ee36ae8d515449356fb"
+            "6ed9c42d4d6969dbb0215c081a29b6aba5a13afc36515b15407b39094f80168b"
+            "2d01c4910dc583438501690b5712e2b8331a1bd829f5c44ad56c06f02a1d0890"
+            "dbf95b7f7c58615748ff24d95de0a227d325fc00f075401ea97556e1e9c26473"
+            "9a00a5c1c5b620179cb6f6eaeae8e1aca00d9e4bd3c6cf53a8260a068d41e94d"
+            "078969a1a8ba854d469d71c603a0ba6fcb4036ad87388692977d903e3efe44cb"
         )
 
         good = self._verify_signature(
             modulus, signature,
-            self._canonical_message("Selftest City", 200, "2026-01-01T00:00"),
+            self._canonical_message(
+                "Selftest City", 200, "2026-01-01T00:00", "2026-01-01T00:30"
+            ),
         )
         bad = self._verify_signature(
             modulus, signature,
-            self._canonical_message("Selftest City", 999, "2026-01-01T00:00"),
+            self._canonical_message(
+                "Selftest City", 999, "2026-01-01T00:00", "2026-01-01T00:30"
+            ),
         )
         return f"OK valid={good} tampered={bad}"
 
@@ -455,12 +495,16 @@ class WeatherParametricInsurance(gl.Contract):
     @gl.public.write
     def set_policyholder(self, new_policyholder: str) -> None:
         """
-        Nominate who receives the payout. Only meaningful before settlement.
+        Nominate who receives the payout.
+
+        Only permitted while the policy is ACTIVE. Once an evaluation has
+        run, the beneficiary is locked — otherwise the owner could redirect
+        a triggered payout to themselves between trigger and settlement.
         """
         self._require_owner()
 
-        if self.policy_status == "SETTLED":
-            raise gl.vm.UserError("POLICY_ALREADY_SETTLED")
+        if self.policy_status != "ACTIVE":
+            raise gl.vm.UserError("BENEFICIARY_LOCKED_AFTER_EVALUATION")
 
         self.policyholder = Address(new_policyholder)
 
@@ -470,8 +514,11 @@ class WeatherParametricInsurance(gl.Contract):
 
     @gl.public.write
     def evaluate_weather_trigger(self, weather_api_url: str) -> None:
-        self._require_owner()
-
+        # Deliberately not owner-gated. The outcome is decided entirely by
+        # the signed, freshness-bound observation and the deterministic
+        # checks below, so the caller has no lever over the result — and an
+        # owner-only gate would let the owner cherry-pick the evaluation
+        # moment. Either party (or anyone) may trigger it.
         if self.policy_status != "ACTIVE":
             raise gl.vm.UserError("POLICY_NOT_ACTIVE")
 
@@ -486,6 +533,8 @@ class WeatherParametricInsurance(gl.Contract):
         trusted_modulus = self.trusted_public_key_modulus
         verify = self._verify_signature
         canonical = self._canonical_message
+        normalize = self._normalize_timestamp
+        to_minutes = self._timestamp_to_minutes
 
         def fetch_weather_record() -> dict:
             try:
@@ -506,12 +555,19 @@ class WeatherParametricInsurance(gl.Contract):
             source_location = payload.get("location")
             temperature_tenths = payload.get("temperature_tenths_c")
             observed_at = payload.get("observed_at")
+            issued_at = payload.get("issued_at")
             signature = payload.get("signature")
 
             if not isinstance(signature, str) or signature == "":
                 return {
                     "valid": False,
                     "error": "SIGNATURE_MISSING",
+                }
+
+            if not isinstance(issued_at, str):
+                return {
+                    "valid": False,
+                    "error": "ISSUED_AT_MISSING",
                 }
 
             if not isinstance(source_location, str):
@@ -544,11 +600,30 @@ class WeatherParametricInsurance(gl.Contract):
             if not verify(
                 trusted_modulus,
                 signature,
-                canonical(source_location, temperature_tenths, observed_at),
+                canonical(source_location, temperature_tenths, observed_at, issued_at),
             ):
                 return {
                     "valid": False,
                     "error": "SIGNATURE_INVALID",
+                }
+
+            # Freshness: the signed issue time and the observation time must
+            # sit close together. Because issued_at is inside the signature,
+            # a stale record cannot be re-stamped without invalidating it.
+            observed_norm = normalize(observed_at)
+            issued_norm = normalize(issued_at)
+
+            if observed_norm == "" or issued_norm == "":
+                return {
+                    "valid": False,
+                    "error": "TIMESTAMP_MALFORMED",
+                }
+
+            age = to_minutes(issued_norm) - to_minutes(observed_norm)
+            if age < 0 or age > MAX_OBSERVATION_AGE_MINUTES:
+                return {
+                    "valid": False,
+                    "error": "OBSERVATION_STALE",
                 }
 
             return {
@@ -779,9 +854,12 @@ Rules:
     def confirm_settlement(self, settlement_reference: str) -> None:
         """
         Pay the policyholder. This transfers real value out of the contract.
-        """
-        self._require_owner()
 
+        Deliberately not owner-gated: once a policy is TRIGGERED and
+        ELIGIBLE, the payout is owed, and the owner must not be able to
+        withhold it. Anyone may execute settlement; the funds always go to
+        the recorded policyholder, so the caller gains nothing.
+        """
         if self.policy_status != "TRIGGERED":
             raise gl.vm.UserError("POLICY_NOT_TRIGGERED")
 
